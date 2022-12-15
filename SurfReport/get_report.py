@@ -163,6 +163,38 @@ def get_wind_direction(soup):
     return results 
 
 
+# Get the average wind speed for the day
+def get_wind_speed(soup):
+    tbody = soup.find_all('tbody')
+    results = []
+    wind_types = ['-danger']
+    winds = []
+
+    for body in tbody:
+        count = 0
+        #strengths = []
+        strengths = 0
+        directions = []
+        # for each day
+        for tr in body.find_all('tr'):
+            # Get data from tag
+            if count == 1:
+                date = tr['data-date-anchor']
+            count += 1
+            td_count = 0
+            # Get the class for wind, as secondary swell affects the numbered position.
+            for types in wind_types:
+                for td in tr.find_all('div', class_=f'stacked-text text-left'):
+                    print(td.span.text)
+                    strengths += int(td.span.text)
+                    td_count += 1 
+
+        # Return the period in seconds, divided by 8 as that is the amount of readings per day.
+        results.append({'Date':date, 'Wind Speed':round(strengths/8)})
+
+    return results 
+
+
 def get_swell_direction(soup):
     tbody = soup.find_all('tbody')
     results = []
@@ -429,7 +461,7 @@ def format_msg(df):
         msg += f"\n{df['Day'][i]} {df['Date'][i]}\n\
 Size: {round((df['Higher Wave Size'][i].mean() + df['Lower Wave Size'][i].mean())/2)}ft\n\
 Energy: {round(df['Energy'][i].mean())}\n\
-{df['Wind Strength'][i]} {df['Wind Direction'][i]} Wind\n"    
+{df['Wind Strength'][i]} {df['Wind Direction'][i]} Wind ({df['Wind Speed'][i]}mph)\n"    
     return msg
 
 # TODO: Function to accept threshold and send signal message if score is above threshold

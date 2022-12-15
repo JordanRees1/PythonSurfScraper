@@ -9,6 +9,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     break_name = req.headers.get('break')
     threshold = req.headers.get('threshold')
+    chat_id = req.headers.get('chat_id')
 
     if not break_name:
         try:
@@ -20,6 +21,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     if not threshold:
         threshold = 'low'
+
+    if not chat_id:
+        chat_id = surf.chat_id
 
     logging.info(break_name)
     logging.info(threshold)
@@ -73,6 +77,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     df_temp = df_temp.merge(df)
     df = pd.DataFrame(surf.get_wind_direction(soup))
     df_temp = df_temp.merge(df)
+    df = pd.DataFrame(surf.get_wind_speed(soup))
+    df_temp = df_temp.merge(df)
 
 
     df_temp = df_temp.drop(columns={'Total Stars', 'inactive Star Count', 'active Star Count'})
@@ -101,7 +107,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     
     # Send message to telegram   
     message = surf.format_msg(scored)
-    surf.send_msg(bot, surf.chat_id, message)
+    surf.send_msg(bot, chat_id, message)
 
     logging.info("Message sent.")
     
