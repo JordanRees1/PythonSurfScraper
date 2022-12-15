@@ -1,20 +1,24 @@
 # Get Surf Report 
 # Given a URL get the surf report details
 import re
-import smtplib
+import os
 import requests
 import pandas as pd
+import telepot as tele
+from io import StringIO
 from bs4 import BeautifulSoup
-from email.message import EmailMessage
+from datetime import date, timedelta
+from azure.storage.blob import BlobServiceClient
 
-# Get recipe list from file
-def get_locations():
-    return open('Surf Report/URLs.txt').readlines()
+# Current harcoded to our group. TODO make this dynamic
+token = '2023059476:AAHmKVHPT_lUz55soRzBSysEJsVZifE2fgY'
+chat_id = -736190449
 
 def get_webpage(page_url):
     page = requests.get(page_url)
     soup = BeautifulSoup(page.content, 'html.parser')
     return soup
+
 
 def count_total_stars(soup, type_):
     tbody = soup.find_all('tbody')
@@ -57,7 +61,6 @@ def get_period(soup):
 
     for body in tbody:
         count = 0
-        star_count = 0
         total_period = 0
         # for each day
         for tr in body.find_all('tr'):
@@ -86,7 +89,6 @@ def get_size(soup):
 
     for body in tbody:
         count = 0
-        star_count = 0
         small_size = 0
         big_size = 0
         # for each day
@@ -120,7 +122,6 @@ def get_wind_direction(soup):
 
     for body in tbody:
         count = 0
-        star_count = 0
         strengths = []
         directions = []
         # for each day
@@ -168,7 +169,6 @@ def get_swell_direction(soup):
 
     for body in tbody:
         count = 0
-        star_count = 0
         directions = []
         # for each day
         for tr in body.find_all('tr'):
@@ -246,8 +246,66 @@ def get_tides(soup):
 
     return results
 
-# TODO: Get wave energy from surf forecast
-#  Will join by name and date 
+
+# Get wave energy from surf forecast
+def get_wave_energy(soup):
+    count = 0 
+    day = 1
+    date_  = date.today()
+    master = []
+    
+    for td in soup.find_all('td', class_=f'forecast-table__cell forecast-table-energy__cell'):
+        count += 1
+        
+        if count == 1:
+            wave_energy = int(td.text) 
+        else:
+            wave_energy += int(td.text)
+              
+        # increment day when count is multiple of 7 
+        if count % 7 == 0:
+            if day == 1:
+                wave_energy = round(wave_energy/6)
+            else:
+                wave_energy = round(wave_energy/7)
+                
+            master.append({'Day':date_.strftime("%A"), 'Date':date_.strftime("%d/%m"), 'Energy':wave_energy})
+            
+            day += 1
+            date_ += timedelta(days=1)
+            
+        # Don't need the eigth day as MSW only does 7
+        if day == 8:
+            break
+        
+    return pd.DataFrame(master)
+
+
+# Generic SF parser - yet to be used but can be implimented to extract any other values
+def surf_forecast_parser(soup, tag, class_, title):
+    count = 0 
+    day = 1
+    date_  = date.today()
+    master = []
+    
+    for td in soup.find_all(tag, class_=class_):
+        count += 1
+        
+        print(td)
+        
+        master.append({'Day':date_.strftime("%A"), 'Date':date_.strftime("%d/%m"), title:td.text})
+        
+        # increment day when count is multiple of 7 
+        if count % 14 == 0:
+            day += 1
+            date_ += timedelta(days=1)
+            
+        # Don't need the eigth day as MSW only does 7
+        if day == 8:
+            break
+        
+    return pd.DataFrame(master)
+
 
 def format_date(df):
     df['day']=df['Date'].str[-4:-2]
@@ -260,73 +318,142 @@ def format_date(df):
     df.insert(0, 'Day', day)
     return df
 
+
 def x(x):
     return re.findall(r'[0-9]+', x)
 
-def score_report(df):
-    df['Score'] = 0
 
-    df.loc[df['Avg Stars'] >= 2, 'Score'] = 2
-    df.loc[df['Avg Stars'] >= 3, 'Score'] = 3
-    df.loc[df['Avg Stars'] >= 4, 'Score'] = 6
+def score_report(df, threshold):
+    
+    if threshold == 'low':
+        df['Score'] = 0
 
-    df.loc[df['Period'] > 10, 'Score'] += 1
-    df.loc[df['Period'] >= 14, 'Score'] += 2
-    df.loc[df['Period'] >= 18, 'Score'] += 3
+        df.loc[df['Avg Stars'] >= 1, 'Score'] = 2
+        df.loc[df['Avg Stars'] >= 2, 'Score'] = 3
+        df.loc[df['Avg Stars'] >= 3, 'Score'] = 5
 
-    df.loc[df['Wind Direction'] == 'Offshore', 'Score'] += 2
-    df.loc[df['Wind Direction'] == 'Onshore', 'Score'] -= 1
+        df.loc[df['Period'] > 9, 'Score'] += 0.5
+        df.loc[df['Period'] > 11, 'Score'] += 1
+        df.loc[df['Period'] > 14, 'Score'] += 2
 
-    df.loc[df['Wind Strength'] == 'Light', 'Score'] += 1.5
-    df.loc[df['Wind Strength'] == 'Strong', 'Score'] -= 0.5
-    df.loc[df['Wind Strength'] == 'Very Strong', 'Score'] -= 1
+        df.loc[df['Wind Direction'] == 'Offshore', 'Score'] += 2
+        df.loc[df['Wind Direction'] == 'Onshore', 'Score'] -= 1.5
 
-    df.loc[df['Lower Wave Size'] > 4, 'Score'] += 1
-    df.loc[df['Lower Wave Size'] > 5, 'Score'] += 2
-    df.loc[df['Higher Wave Size'] > 5, 'Score'] += 1
-    df.loc[df['Higher Wave Size'] > 8, 'Score'] += 2
+        df.loc[df['Wind Strength'] == 'Light', 'Score'] += 1.5
+        df.loc[df['Wind Strength'] == 'Strong', 'Score'] -= 0.5
+        df.loc[df['Wind Strength'] == 'Very Strong', 'Score'] -= 2
 
-    df.loc[df['Score'] > 10, 'Score'] = 10
+        df.loc[df['Lower Wave Size'] >= 3, 'Score'] += 1
+        df.loc[df['Lower Wave Size'] >= 4, 'Score'] += 2
+        df.loc[df['Higher Wave Size'] >= 4.5, 'Score'] += 1
+        df.loc[df['Higher Wave Size'] >= 6, 'Score'] += 2
+        
+        df.loc[df['Energy'] >= 150, 'Score'] += 1
+        df.loc[df['Energy'] >= 250, 'Score'] += 2
+        df.loc[df['Energy'] < 100, 'Score'] -= 7.5
+        
+
+        df.loc[df['Score'] > 10, 'Score'] = 10
+        df.loc[df['Score'] < 0, 'Score'] = 0
+        
+    else:
+        df['Score'] = 0
+
+        df.loc[df['Avg Stars'] >= 2, 'Score'] = 2
+        df.loc[df['Avg Stars'] >= 3, 'Score'] = 3
+        df.loc[df['Avg Stars'] >= 4, 'Score'] = 6
+
+        df.loc[df['Period'] > 10, 'Score'] += 0.5
+        df.loc[df['Period'] > 14, 'Score'] += 1
+        df.loc[df['Period'] > 18, 'Score'] += 2
+
+        df.loc[df['Wind Direction'] == 'Offshore', 'Score'] += 2
+        df.loc[df['Wind Direction'] == 'Onshore', 'Score'] -= 1.5
+
+        df.loc[df['Wind Strength'] == 'Light', 'Score'] += 1
+        df.loc[df['Wind Strength'] == 'Strong', 'Score'] -= 0.5
+        df.loc[df['Wind Strength'] == 'Very Strong', 'Score'] -= 1
+
+        df.loc[df['Lower Wave Size'] > 4, 'Score'] += 1
+        df.loc[df['Lower Wave Size'] > 5, 'Score'] += 2
+        df.loc[df['Higher Wave Size'] > 5, 'Score'] += 1
+        df.loc[df['Higher Wave Size'] > 8, 'Score'] += 2
+        
+        df.loc[df['Energy'] >= 200, 'Score'] += 1
+        df.loc[df['Energy'] >= 400, 'Score'] += 2
+        df.loc[df['Energy'] < 150, 'Score'] -= 5
+        
+
+        df.loc[df['Score'] > 10, 'Score'] = 10
+        df.loc[df['Score'] < 0, 'Score'] = 0
 
     return df
+
 
 # Returns a list of elements: Break Name, Stars, Period, Wave Height, Score and Days (list)
 def summarise_report(df):
     break_ = df['Break Location'].max()
-    avg_stars = round(df['Avg Stars'].mean())
+    if df['Avg Stars'].mean == 0:
+        avg_stars = 0
+    else:
+        avg_stars = round(df['Avg Stars'].mean())
     avg_period = round(df['Period'].mean())
     avg_score = round(df['Score'].mean())
     avg_waves = round((df['Higher Wave Size'].mean() + df['Lower Wave Size'].mean())/2)
     return [break_, avg_stars, str(avg_period)+'s',str(avg_waves)+'ft', avg_score, df['Day'].values]
 
-def create_message(df):
-    summary = summarise_report(df[(df['Score'] > 5)])
 
-    break_ = summary[0]
-    stars = summary[1]
-    period = summary[2]
-    wave_height = summary[3] 
-    score = summary[4]
-    days = summary[5]
-
-    output_str = f"""\nSurfs up at {break_}!!!\n\n
-Waves are pumping at {wave_height} at {period}.
-With an average star count of {stars} on MagicSeaweed, scoring {score}/10\n
-Days to look at our {days}\n\n"""
-
-    return output_str
+# Returns the site URL from dataframe in lake for a given break and site
+def get_break_values(df, break_name, site):
+    return df[site].loc[df['break'] == break_name].values[0]
 
 
-def send_email(message):
-    server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+# initalise telegram bot
+def initalise_bot(token):
+    bot = tele.Bot(token)
+    return bot
 
-    msg = EmailMessage()
-    msg.set_content(message)
 
-    msg['Subject'] = f'Surfs Up!!!'
-    msg['From'] = 'surfsupreports@gmail.com'
-    msg['To'] = 'jordan.w@my.com'
+# send a telegram message to a chat id
+def send_msg(bot, chat_id, msg):
+    bot.sendMessage(chat_id, msg)
+    return 1
 
-    server.login('surfsupreports@gmail.com', 'surfbot123?')
-    server.send_message(msg) 
-    server.quit()
+
+# Format message for signal
+def format_msg(df):
+    df = df.loc[df['Score'] > 5]
+
+    msg = f"{df['Break Location'].max()} \n"
+    for i in range(len(df)):
+        msg += f"\n{df['Day'][i]} {df['Date'][i]}\n\
+Size: {round((df['Higher Wave Size'][i].mean() + df['Lower Wave Size'][i].mean())/2)}ft\n\
+Energy: {round(df['Energy'][i].mean())}\n\
+{df['Wind Strength'][i]} {df['Wind Direction'][i]} Wind\n"    
+    return msg
+
+# TODO: Function to accept threshold and send signal message if score is above threshold
+
+
+# Gets a dataframe containing all break values stored in the lake CSV file.
+def get_break_urls():
+    account_name = 'jordanslake'
+    account_key = os.environ['lakeKey']
+
+    # Azure blob connection string for CSV 
+    conn_str = f'DefaultEndpointsProtocol=https;AccountName={account_name};AccountKey={account_key}==;EndpointSuffix=core.windows.net'
+
+    blob_service_client = BlobServiceClient.from_connection_string(conn_str)
+
+    blob_client = blob_service_client.get_blob_client(container='surf-report', blob='breaks.csv')
+
+    try:
+        storedData = blob_client.download_blob()
+        df = pd.read_csv(StringIO(storedData.content_as_text()))
+
+        # If no blob exists create a new one - ErrorCode:BlobNotFound
+    except:
+        # create blank dataframe with columns
+        df = pd.DataFrame(columns=['break', 'msw', 'surf_forecast'])
+
+    return df

@@ -7,55 +7,102 @@ import azure.functions as func
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Python HTTP trigger function processed a request.')
 
-    spots = req.headers.get('spots')
-    spots = spots.split(',')
+    break_name = req.headers.get('break')
+    threshold = req.headers.get('threshold')
 
-    logging.info(spots)
-
-    if not spots:
+    if not break_name:
         try:
             req_body = req.get_json()
         except ValueError:
             pass
         else:
-            spots = req_body.get('spots')
+            break_name = req_body.get('break')
+
+    if not threshold:
+        threshold = 'low'
+
+    logging.info(break_name)
+    logging.info(threshold)
+
+    df = surf.get_break_urls()
+
+    logging.info("getting break values from data lake file")
+
+    try:
+        msw_link = surf.get_break_values(df=df, break_name=break_name, site='msw')
+        sf_link = surf.get_break_values(df=df, break_name=break_name, site='surf_forecast')
+    except:
+        return func.HttpResponse(
+            f"Cannot find {break_name}, please add this to the file in the format: break_name, msw_url, surf_forcast_url",
+            status_code=404)
+
+    logging.info("Creating telegram bot")
+
+    # Create bot
+    bot = surf.initalise_bot(surf.token)
+
+    logging.info("Bot successfuly created")
+
+    logging.info("Getting webpage")
+
+    # Get MSW webpage
+    soup = surf.get_webpage(msw_link)
+
+    logging.info("Finding break")
+
+    # Get surf location from page title
+    surf_break = soup.findAll('h1', class_='nomargin page-title')[0].text.split('Surf')[0]
+
+    logging.info("Getting break info...")
+
+    # Create dataframe from dict and join
+    df = pd.DataFrame(surf.get_day_stars(soup, 'active'))
+    df['Break Location'] = surf_break
+    df2 = pd.DataFrame(surf.get_day_stars(soup, 'inactive'))
+    df_temp = df.merge(df2)
+
+    # Get average rating for each day (semi star = half)
+    df_temp['Total Stars'] = (df_temp['inactive Star Count'] / 2) + df_temp['active Star Count']
+    df_temp['Avg Stars'] = round(df_temp['Total Stars'] / 8, 2)
+
+    df = pd.DataFrame(surf.get_size(soup))
+    df_temp = df_temp.merge(df)
+    df = pd.DataFrame(surf.get_swell_direction(soup))
+    df_temp = df_temp.merge(df)
+    df = pd.DataFrame(surf.get_period(soup))
+    df_temp = df_temp.merge(df)
+    df = pd.DataFrame(surf.get_wind_direction(soup))
+    df_temp = df_temp.merge(df)
 
 
-    for spot in spots:
-        soup = surf.get_webpage(spot)
+    df_temp = df_temp.drop(columns={'Total Stars', 'inactive Star Count', 'active Star Count'})
 
-        # Get surf location from page title
-        surf_break = soup.findAll('h1', class_='nomargin page-title')[0].text.split('Surf')[0]
+    logging.info("Formatting MSW results...")
 
-        # Create dataframe from dict and join
-        df = pd.DataFrame(surf.get_day_stars(soup, 'active'))
-        df['Break Location'] = surf_break
-        df2 = pd.DataFrame(surf.get_day_stars(soup, 'inactive'))
-        df_final = df.merge(df2)
+    output = surf.format_date(df_temp)
 
-        # Get average rating for each day (semi star = half)
-        df_final['Total Stars'] = (df_final['inactive Star Count'] / 2) + df_final['active Star Count']
-        df_final['Avg Stars'] = round(df_final['Total Stars'] / 8, 2)
-        
-        df = pd.DataFrame(surf.get_size(soup))
-        df_final = df_final.merge(df)
-        df = pd.DataFrame(surf.get_swell_direction(soup))
-        df_final = df_final.merge(df)
-        df = pd.DataFrame(surf.get_period(soup))
-        df_final = df_final.merge(df)
-        df = pd.DataFrame(surf.get_wind_direction(soup))
-        df_final = df_final.merge(df)
+    logging.info("Getting Surf Forcast data")
 
-        df_final = df_final.drop(columns={'Total Stars', 'inactive Star Count', 'active Star Count'})
-        output = surf.format_date(df_final)
-        
-        scored = surf.score_report(output)
+    # Get the HTML for the corresponding surf forecast url
+    sf_soup = surf.get_webpage(sf_link)
 
-        logging.info(scored['Avg Stars'])
-        logging.info(scored['Score'])
+    # Get the wave energy from the surf forecast page
+    energy = surf.get_wave_energy(sf_soup)
+
+    logging.info("Meging...")
+
+    output = output.merge(energy)
+
+    logging.info("Scoring...")
+
+    scored = surf.score_report(df=output, threshold=threshold)
+
+    logging.info("Sending to telegram.")
     
-        if len(scored[scored['Score'] > 5]) > 0:
-            surf.send_email(surf.create_message(scored))
-        
+    # Send message to telegram   
+    message = surf.format_msg(scored)
+    surf.send_msg(bot, surf.chat_id, message)
+
+    logging.info("Message sent.")
     
-    return func.HttpResponse(f"Reports checked.")
+    return func.HttpResponse(f"Report checked {break_name} and successfuly sent to telegram.")
